@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-25T15:47:26.165631+00:00",
+  "title": "Design System: FlightDeck",
+  "extensions": {
+    "native": {
+      "platform": "macOS",
+      "framework": "SwiftUI",
+      "source": "Sources/FlightDeck/FlightDeck.swift",
+      "units": "points",
+      "colors": {
+        "accent": "Color.accentColor",
+        "primary-text": ".primary",
+        "secondary-text": ".secondary",
+        "warning": "Color.orange",
+        "success": "Color.green",
+        "error-background": "Color.orange.opacity(0.09)",
+        "notice-background": "Color.green.opacity(0.08)",
+        "log-background": "Color(nsColor: .textBackgroundColor)",
+        "log-border": "Color(nsColor: .separatorColor)"
+      },
+      "typography": {
+        "page-title": ".title2.weight(.semibold)",
+        "row-title": ".headline",
+        "body": "inherited system text",
+        "processing-copy": ".callout",
+        "metadata": ".caption",
+        "fine-metadata": ".caption2",
+        "section-label": ".caption.weight(.semibold)",
+        "log": ".system(size: 11, design: .monospaced)",
+        "device-id": ".system(size: 10, design: .monospaced)",
+        "storage-size": ".monospacedDigit()"
+      },
+      "geometry": {
+        "windowMinimum": {
+          "width": 980,
+          "height": 660
+        },
+        "windowDefault": {
+          "width": 1180,
+          "height": 780
+        },
+        "runListWidth": {
+          "minimum": 230,
+          "ideal": 270,
+          "maximum": 330
+        },
+        "jobDetailMinimumWidth": 370,
+        "buildFieldWidth": 230,
+        "logBorderWidth": 0.5
+      },
+      "controlStyles": {
+        "releaseAction": ".borderedProminent",
+        "sidebarAction": ".plain",
+        "textField": ".roundedBorder",
+        "sidebarList": ".sidebar",
+        "deviceList": ".inset",
+        "progress": ".controlSize(.small)"
+      },
+      "previewPolicy": "Native declarations are preserved without fabricated HTML/CSS equivalents. Component records describe source implementation; they are not browser-renderable previews."
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": [],
+    "verification": {
+      "method": "source inspection",
+      "visualVerification": "incomplete",
+      "reason": "Organizational policy blocked CUA access to local.flightdeck.app. No screenshot or app-control verification performed."
+    }
+  },
+  "components": [
+    {
+      "name": "Release Action",
+      "kind": "button",
+      "description": "Native bordered-prominent TestFlight button opens a confirmation dialog; disabled while busy or a job is active."
+    },
+    {
+      "name": "Standard Action",
+      "kind": "button",
+      "description": "System button for readiness, archive, refresh, reveal, and device actions; native interaction states."
+    },
+    {
+      "name": "Destructive Action",
+      "kind": "button",
+      "description": "Native destructive Remove action, available for eligible storage rows, followed by path-specific confirmation."
+    },
+    {
+      "name": "Worktree Field",
+      "kind": "input",
+      "description": "Rounded-border native text field within LabeledContent; placeholder reflects selected project root."
+    },
+    {
+      "name": "Workspace Sidebar",
+      "kind": "nav",
+      "description": "Sidebar List with workspace and project sections, SF Symbols, accent active-section text, and selected-project checkmark."
+    },
+    {
+      "name": "Recent Run Row",
+      "kind": "custom",
+      "description": "Native selectable list row combining status symbol, release mode, caption stage, and fine metadata."
+    },
+    {
+      "name": "Run Log",
+      "kind": "custom",
+      "description": "Selectable monospaced output in a two-axis ScrollView with semantic text background and separator border."
+    },
+    {
+      "name": "Device Lease Row",
+      "kind": "custom",
+      "description": "Inset native list row with device, owner, worktree, optional seed metadata, and explicit lease actions."
+    },
+    {
+      "name": "Storage Row",
+      "kind": "custom",
+      "description": "Native list row with path, eligibility, measured or unknown bytes, Reveal, and eligible-only Remove."
+    },
+    {
+      "name": "Feedback Strip",
+      "kind": "custom",
+      "description": "Dismissible error or notice content with low-opacity semantic status color above the detail surface."
+    }
+  ],
+  "narrative": {
+    "northStar": "Native macOS Operate",
+    "overview": "A compact SwiftUI working interface. System text, alignment, dividers, and explicit state labels establish hierarchy; lists carry operational information.",
+    "keyCharacteristics": [
+      "Native controls",
+      "Semantic system appearance",
+      "Explicit ownership",
+      "Readable operational state",
+      "Selectable diagnostics"
+    ],
+    "rules": [
+      {
+        "name": "The System Appearance Rule",
+        "body": "Preserve semantic colors and native appearance adaptation; do not freeze them to a sampled light-mode palette.",
+        "section": "colors"
+      }
+    ],
+    "dos": [
+      "Do preserve native system controls and typography.",
+      "Do accompany status colors with text or symbols.",
+      "Do distinguish source inspection from visual verification."
+    ],
+    "donts": [
+      "Don't invent fixed values for dynamic semantic colors or text styles.",
+      "Don't add decorative cards or shadows to this established interface.",
+      "Don't claim visual QA has passed."
+    ]
+  }
+}

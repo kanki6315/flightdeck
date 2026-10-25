@@ -1,0 +1,6 @@
+.build/
+FlightDeck.app/
+__pycache__/
+*.pyc
+.DS_Store
+FlightDeck.zip

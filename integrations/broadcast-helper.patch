@@ -1,0 +1,250 @@
+diff --git a/.flightdeck/README.md b/.flightdeck/README.md
+new file mode 100644
+index 0000000..1401018
+--- /dev/null
++++ b/.flightdeck/README.md
+@@ -0,0 +1,13 @@
++# FlightDeck release integration
++
++The existing release entry point still works from a terminal. Managed runs additionally set `FLIGHTDECK_RUN_ID`, `FLIGHTDECK_EVENTS_FILE`, and an exact `TEST_DESTINATION` UUID. The helper emits newline-delimited JSON containing timestamp, stage, build, version and absolute archive path; human-readable logs are unchanged. No credentials are emitted.
++
++When managed tests run, destination validation happens before project preflight, and parallel simulator testing is disabled so Xcode does not create unleased test clones. Forkware additionally requires distinct `TEST_IPHONE_UDID` and `TEST_IPAD_UDID`; its test runner accepts those environment defaults. `--skip-tests` does not require simulator IDs. Project signing, CloudKit gates and upload defaults remain with the existing release script.
++
++FlightDeck is the lease authority. These scripts validate the supplied destination shape; they do not independently verify lease tokens. All agents must use the shared CLI and exact UUIDs as described in `AGENTS.md`. Check in the helper together with its release entry point so every worktree can source it.
++
++Run the isolated contract checks without Xcode, credentials, simulator operations or uploads:
++
++```sh
++python3 -m unittest discover -s .flightdeck -p 'test_*.py' -v
++```
+diff --git a/.flightdeck/release.sh b/.flightdeck/release.sh
+new file mode 100644
+index 0000000..f9622a4
+--- /dev/null
++++ b/.flightdeck/release.sh
+@@ -0,0 +1,41 @@
++# FlightDeck protocol 1. Sourced after release options have been parsed.
++# Terminal releases do not require the FlightDeck CLI or an event file.
++FLIGHTDECK_PROTOCOL=1
++flightdeck_event() {
++    [ -n "${FLIGHTDECK_EVENTS_FILE:-}" ] || return 0
++    python3 - "$FLIGHTDECK_EVENTS_FILE" "$1" "${build:-}" "${version:-}" "${archive:-}" <<'FD_EVENT'
++import datetime, json, os, sys
++path, stage, build, version, archive = sys.argv[1:]
++with open(path, 'a') as stream:
++    stream.write(json.dumps(dict(time=datetime.datetime.now(datetime.timezone.utc).isoformat(), stage=stage, build=build, version=version, archive=os.path.abspath(archive) if archive else '')) + '\n')
++FD_EVENT
++}
++flightdeck_require_udid() {
++    if [[ ! "$1" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
++        printf 'FlightDeck requires an explicit simulator UUID for %s\n' "$2" >&2
++        return 2
++    fi
++}
++if [ -n "${FLIGHTDECK_RUN_ID:-}" ] && [ "${run_tests:-1}" = 1 ]; then
++    case "${TEST_DESTINATION:-}" in
++        'platform=iOS Simulator,id='*) ;;
++        *) echo "FlightDeck requires an explicitly leased simulator destination" >&2; exit 2 ;;
++    esac
++    flightdeck_require_udid "${TEST_DESTINATION#platform=iOS Simulator,id=}" TEST_DESTINATION
++    if [ "${FLIGHTDECK_REQUIRES_IPAD:-0}" = 1 ]; then
++        flightdeck_require_udid "${TEST_IPHONE_UDID:-}" TEST_IPHONE_UDID
++        flightdeck_require_udid "${TEST_IPAD_UDID:-}" TEST_IPAD_UDID
++        if [ "$TEST_IPHONE_UDID" = "$TEST_IPAD_UDID" ] || [ "$TEST_DESTINATION" != "platform=iOS Simulator,id=$TEST_IPHONE_UDID" ]; then
++            echo "FlightDeck requires distinct iPhone/iPad leases and a matching phone destination" >&2
++            exit 2
++        fi
++    fi
++    export TEST_WORKERS=1
++    export TEST_PARALLEL_ENABLED=NO
++fi
++
++# Preserve Xcode's existing terminal defaults unless an override is supplied.
++flightdeck_test_args=()
++if [ -n "${TEST_PARALLEL_ENABLED:-}" ]; then
++    flightdeck_test_args=(-parallel-testing-enabled "$TEST_PARALLEL_ENABLED")
++fi
+diff --git a/.flightdeck/test_release.py b/.flightdeck/test_release.py
+new file mode 100644
+index 0000000..5611f58
+--- /dev/null
++++ b/.flightdeck/test_release.py
+@@ -0,0 +1,104 @@
++"""Offline checks: never build, install, sign or upload an app."""
++import contextlib
++import io
++import json
++import os
++from pathlib import Path
++import runpy
++import subprocess
++import sys
++import tempfile
++import unittest
++from unittest.mock import patch
++
++ROOT = Path(__file__).resolve().parents[1]
++HELPER = ROOT / '.flightdeck/release.sh'
++RELEASE = next(ROOT / p for p in ('release_ios', 'release.sh', 'ios/release.sh') if (ROOT / p).is_file())
++PHONE = '12345678-1234-1234-1234-123456789abc'
++TABLET = '87654321-4321-4321-4321-cba987654321'
++
++
++class ReleaseContractTests(unittest.TestCase):
++    def shell(self, script, env=None, args=()):
++        clean = {k: v for k, v in os.environ.items() if not k.startswith(('FLIGHTDECK_', 'TEST_'))}
++        clean.update(env or {})
++        return subprocess.run(['bash', '-c', 'set -euo pipefail; ' + script, 'test', str(HELPER), *args], env=clean, cwd=ROOT, capture_output=True, text=True, timeout=10)
++
++    def managed(self, **extra):
++        return dict(FLIGHTDECK_RUN_ID='test-only', TEST_DESTINATION='platform=iOS Simulator,id=' + PHONE, **extra)
++
++    def test_shell_syntax_and_help(self):
++        subprocess.run(['bash', '-n', str(RELEASE)], check=True)
++        subprocess.run(['bash', '-n', str(HELPER)], check=True)
++        result = subprocess.run(['bash', str(RELEASE), '--help'], capture_output=True, text=True, timeout=10)
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertIn('--no-upload', result.stdout)
++
++    def test_unmanaged_release_does_not_need_a_destination(self):
++        result = self.shell('source "$1"; flightdeck_event "No machine output"; printf "%s" "${TEST_PARALLEL_ENABLED:-unset}"')
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, 'unset')
++
++    def test_events_preserve_special_characters_and_archive_path(self):
++        with tempfile.TemporaryDirectory() as temp:
++            event = Path(temp) / 'events.jsonl'
++            result = self.shell('source "$1"; build=298.12.34; version=1.2; archive="build/My App.xcarchive"; flightdeck_event "$2"', {'FLIGHTDECK_EVENTS_FILE': str(event)}, ('A "quoted" stage\nwith a newline',))
++            self.assertEqual(result.returncode, 0, result.stderr)
++            lines = event.read_text().splitlines()
++            self.assertEqual(len(lines), 1)
++            payload = json.loads(lines[0])
++            self.assertEqual(payload['stage'], 'A "quoted" stage\nwith a newline')
++            self.assertEqual(payload['archive'], str(ROOT / 'build/My App.xcarchive'))
++            self.assertEqual(payload['build'], '298.12.34')
++
++    def test_managed_destination_is_required_before_preflight(self):
++        result = self.shell('bash "' + str(RELEASE) + '" --no-upload', {'FLIGHTDECK_RUN_ID': 'test-only'})
++        self.assertEqual(result.returncode, 2, result.stderr)
++        self.assertIn('FlightDeck requires', result.stderr)
++
++    def test_names_and_nonhex_uuids_are_rejected(self):
++        for value in ('platform=iOS Simulator,name=iPhone', 'platform=iOS Simulator,id=zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz', 'platform=iOS Simulator,id=' + PHONE + ',OS=latest'):
++            with self.subTest(destination=value):
++                result = self.shell('source "$1"', dict(FLIGHTDECK_RUN_ID='test-only', TEST_DESTINATION=value))
++                self.assertNotEqual(result.returncode, 0)
++
++    def test_managed_runs_disable_clones_and_parallel_workers(self):
++        result = self.shell('source "$1"; printf "%s/%s" "$TEST_PARALLEL_ENABLED" "$TEST_WORKERS"', self.managed(TEST_PARALLEL_ENABLED='YES', TEST_WORKERS='4'))
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, 'NO/1')
++        if not (ROOT / 'ios/scripts/run_ui_tests.py').exists():
++            self.assertIn('${flightdeck_test_args[@]+"${flightdeck_test_args[@]}"}', RELEASE.read_text())
++
++    def test_skipped_tests_do_not_require_devices(self):
++        result = self.shell('run_tests=0; source "$1"', {'FLIGHTDECK_RUN_ID': 'test-only', 'FLIGHTDECK_REQUIRES_IPAD': '1'})
++        self.assertEqual(result.returncode, 0, result.stderr)
++
++    def test_dual_device_requires_both_distinct_matching_ids(self):
++        base = self.managed(FLIGHTDECK_REQUIRES_IPAD='1', TEST_IPHONE_UDID=PHONE, TEST_IPAD_UDID=TABLET)
++        self.assertEqual(self.shell('source "$1"', base).returncode, 0)
++        for changed in ({'TEST_IPAD_UDID': ''}, {'TEST_IPAD_UDID': PHONE}, {'TEST_IPHONE_UDID': TABLET}):
++            with self.subTest(changed=changed):
++                self.assertNotEqual(self.shell('source "$1"', dict(base, **changed)).returncode, 0)
++
++    @unittest.skipUnless((ROOT / 'ios/scripts/run_ui_tests.py').exists(), 'Only Forkware has this test runner')
++    def test_forkware_uses_env_devices_instead_of_first_available(self):
++        inventory = {'devices': {'iOS': [
++            {'udid': 'unleased-phone', 'name': 'iPhone first', 'isAvailable': True},
++            {'udid': 'unleased-tablet', 'name': 'iPad first', 'isAvailable': True},
++            {'udid': PHONE, 'name': 'iPhone leased', 'isAvailable': True},
++            {'udid': TABLET, 'name': 'iPad leased', 'isAvailable': True},
++        ]}}
++        calls = []
++        def fake_run(command, **kwargs):
++            calls.append(command)
++            return subprocess.CompletedProcess(command, 0)
++        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'TEST_IPHONE_UDID': PHONE, 'TEST_IPAD_UDID': TABLET}), patch.object(sys, 'argv', ['run_ui_tests.py', '--output', temp]), patch.object(subprocess, 'check_output', return_value=json.dumps(inventory).encode()), patch.object(subprocess, 'run', side_effect=fake_run), contextlib.redirect_stdout(io.StringIO()):
++            with self.assertRaises(SystemExit) as exit:
++                runpy.run_path(str(ROOT / 'ios/scripts/run_ui_tests.py'), run_name='__main__')
++            self.assertEqual(exit.exception.code, 0)
++        destinations = [c[c.index('-destination') + 1] for c in calls if c[0] == 'xcodebuild']
++        self.assertEqual(destinations, ['platform=iOS Simulator,id=' + PHONE, 'platform=iOS Simulator,id=' + TABLET])
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/.github/workflows/flightdeck.yml b/.github/workflows/flightdeck.yml
+new file mode 100644
+index 0000000..6d7bafd
+--- /dev/null
++++ b/.github/workflows/flightdeck.yml
+@@ -0,0 +1,29 @@
++name: FlightDeck integration
++on:
++  pull_request:
++    paths:
++      - '.flightdeck/**'
++      - 'AGENTS.md'
++      - 'ios/release.sh'
++      - 'ios/scripts/run_ui_tests.py'
++      - '.github/workflows/flightdeck.yml'
++  push:
++    branches: [main]
++    paths:
++      - '.flightdeck/**'
++      - 'AGENTS.md'
++      - 'ios/release.sh'
++      - 'ios/scripts/run_ui_tests.py'
++      - '.github/workflows/flightdeck.yml'
++permissions:
++  contents: read
++jobs:
++  contract:
++    runs-on: ubuntu-latest
++    timeout-minutes: 5
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          persist-credentials: false
++      - name: Validate release and lease contract
++        run: python3 -m unittest discover -s .flightdeck -p 'test_*.py' -v
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..a3f4e5f
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,9 @@
++# Agent instructions
++
++## FlightDeck simulator coordination
++
++Use `flightdeck` (installed at `~/.local/bin/flightdeck`) for coordinated releases and simulator ownership. `flightdeck start pitpass --worktree "$PWD" --mode archive` runs the existing project checks with automatically leased simulators; use `--mode testflight` only when an upload is authorized. Pass the intended worktree root explicitly, including when invoking from a subdirectory. Omitting `--worktree` selects FlightDeck's configured checkout, not the current directory.
++
++For other simulator work, acquire a lease with `flightdeck lease acquire --project pitpass --worktree "$PWD" --device UUID --owner DESCRIPTIVE_AGENT_OR_TASK_ID`. Keep the returned token, use that exact UUID for all install, launch, test, capture, boot and shutdown commands, heartbeat periodically with `flightdeck lease heartbeat --device UUID --token TOKEN`, and release in cleanup with `flightdeck lease release --device UUID --token TOKEN`. Do not use `booted`, choose another agent's device, erase a retained simulator, or assume a stale heartbeat means a device is free. Disable parallel simulator testing when using a single leased destination. The lease is cooperative: direct Xcode/simctl operations can bypass it.
++
++Release scripts emit structured progress when launched by FlightDeck. Keep `.flightdeck/release.sh` with the release script in commits and worktrees. Persistent data remains after releasing a lease. Project-specific distribution and device restrictions elsewhere in this file still apply.
+diff --git a/ios/release.sh b/ios/release.sh
+index 519f2de..0a61f3f 100755
+--- a/ios/release.sh
++++ b/ios/release.sh
+@@ -45,7 +45,10 @@ while [ $# -gt 0 ]; do
+     shift
+ done
+ 
+-log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
++# FLIGHTDECK_PROTOCOL=1
++source "$here/../.flightdeck/release.sh"
++
++log() { flightdeck_event "$*"; printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+ die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+ 
+ # --- Preflight -------------------------------------------------------------
+@@ -106,6 +109,7 @@ if [ "$run_tests" = 1 ]; then
+     [ -n "$test_destination" ] || test_destination="$(python3 "$here/test_simulator.py")"
+     log "Unit tests (simulator)"
+     xcodebuild test \
++        ${flightdeck_test_args[@]+"${flightdeck_test_args[@]}"} \
+         -project PitPass.xcodeproj -scheme PitPass \
+         -destination "$test_destination" \
+         -derivedDataPath build-tests \

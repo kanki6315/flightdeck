@@ -1,0 +1,7 @@
+[
+  {"id":"pitpass","name":"Pitpass","root":"~/claude-projects/broadcast-helper","script":"ios/release.sh","buildRoot":"ios/build","families":["iPad"],"bundle":"com.arjunakankipati.pitpass"},
+  {"id":"patchbridge","name":"Patchbridge","root":"~/claude-projects/patchbridge","script":"release_ios","buildRoot":"build","families":["iPhone"],"bundle":""},
+  {"id":"telemetee","name":"Telemetee","root":"~/claude-projects/telemetee","script":"release.sh","buildRoot":"build","families":["iPhone"],"bundle":"com.arjunakankipati.telemetee"},
+  {"id":"cuekeeper","name":"Cuekeeper","root":"~/claude-projects/cuekeeper","script":"release.sh","buildRoot":"build","families":["iPhone"],"bundle":""},
+  {"id":"forkware","name":"Forkware","root":"~/claude-projects/forkware","script":"ios/release.sh","buildRoot":"ios/build","families":["iPhone","iPad"],"bundle":"com.arjunakankipati.forkware"}
+]

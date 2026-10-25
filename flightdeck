@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""Locate the runner through direct, absolute, or relative symlink invocations."""
+import os
+from pathlib import Path
+import sys
+
+engine = Path(__file__).resolve().parent / 'engine' / 'flightdeck.py'
+os.execv(sys.executable, [sys.executable, str(engine), *sys.argv[1:]])
