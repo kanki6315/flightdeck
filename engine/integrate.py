@@ -31,12 +31,32 @@ def transformed(p):
     return edits
 
 
+def test_transformed(p):
+    import test_adapters
+    root = Path(p['root'])
+    edits = {root / '.flightdeck/test.sh': test_adapters.script(p['id'])}
+    instructions = root / 'AGENTS.md'
+    text = instructions.read_text() if instructions.exists() else '# Agent instructions\n'
+    marker = '## FlightDeck managed tests'
+    if marker not in text:
+        text += f"""
+
+{marker}
+
+Run development tests with `flightdeck start {p['id']} --worktree "$PWD" --mode test` (use the absolute worktree root). This returns a job ID immediately. Poll `flightdeck detail JOB_ID` until terminal status; a successful launch is not a passing test run. Use `flightdeck cancel JOB_ID` to stop it. Tests acquire and heartbeat simulator leases automatically and release them only after child processes stop. Do not manually release job-owned leases.
+
+Test jobs accept uncommitted changes, run `.flightdeck/test.sh`, and never archive, upload or tag. Keep the worktree unchanged until the job finishes. Logs and result bundles live in the returned job folder. Separate worktrees can test concurrently on different leased simulators; releases run exclusively. Existing authorization requirements for UI tests still apply. For install/launch/debug work outside a managed test job, continue using explicit manual leases.
+"""
+    edits[instructions] = text
+    return {path: content for path, content in edits.items() if not path.exists() or path.read_text() != content}
+
+
 def main():
-    a=argparse.ArgumentParser(description=__doc__); a.add_argument('--apply',action='store_true'); a.add_argument('--project'); args=a.parse_args()
+    a=argparse.ArgumentParser(description=__doc__); a.add_argument('--apply',action='store_true'); a.add_argument('--project'); a.add_argument('--tests-only', action='store_true'); args=a.parse_args()
     report=[]
     for p in fd.projects():
         if args.project and p['id']!=args.project: continue
-        edits=transformed(p)
+        edits=test_transformed(p) if args.tests_only else transformed(p)
         for path,content in edits.items():
             if args.apply:
                 path.parent.mkdir(parents=True,exist_ok=True); path.write_text(content)

@@ -5,6 +5,9 @@ struct Project: Codable, Identifiable { let id, name, root, script, buildRoot: S
 struct Job: Codable, Identifiable {
     let id, project, root, mode, status, stage, created, updated: String
     let commit, log, error: String
+    var dirty: Bool?
+    var artifacts: String?
+    var title: String { mode == "test" ? "Tests" : mode == "testflight" ? "TestFlight" : "Local archive" }
     var output: String?
     var monitorError: String?
     var active: Bool { ["queued", "running", "cancelling", "interrupted"].contains(status) }
@@ -37,7 +40,12 @@ struct Failure: Codable { let error: String }
     var currentProject: Project? { projects.first { $0.id == selectedProject } }
     var visibleJobs: [Job] { jobs.filter { $0.project == selectedProject } }
     var root: String { worktree.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? currentProject?.root ?? "" : worktree }
+    var testConflict: Bool {
+        let path = URL(fileURLWithPath: (root as NSString).expandingTildeInPath).resolvingSymlinksInPath().path
+        return jobs.contains { $0.active && ($0.mode != "test" || $0.root == path) }
+    }
     var rootArgs: [String] { worktree.isEmpty ? [] : ["--worktree", worktree] }
+    private var refreshGeneration = 0
     let engine: String
     let python: String
 
@@ -80,10 +88,18 @@ struct Failure: Codable { let error: String }
         catch { self.error = error.localizedDescription }
     }
     func refresh() async throws {
-        jobs = try await call(["jobs"], as: [Job].self)
-        if let key = selectedJob {
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        let key = selectedJob
+        let project = selectedProject
+        let fetchedJobs = try await call(["jobs"], as: [Job].self)
+        guard generation == refreshGeneration else { return }
+        jobs = fetchedJobs
+        if let key {
             let fetched = try await call(["detail", key], as: Job.self)
-            if selectedJob == key && selectedProject == fetched.project { detail = fetched }
+            guard generation == refreshGeneration, selectedJob == key,
+                  selectedProject == project, project == fetched.project else { return }
+            detail = fetched
         }
     }
     func loadDevices() { perform { self.devices = try await self.call(["devices"], as: [Device].self) } }
@@ -97,14 +113,14 @@ struct Failure: Codable { let error: String }
     func start(_ mode: String) {
         perform {
             var args = ["start", self.selectedProject, "--mode", mode] + self.rootArgs
-            if self.skipTests { args.append("--skip-tests") }
-            if !self.build.isEmpty { args += ["--build", self.build] }
+            if mode != "test" && self.skipTests { args.append("--skip-tests") }
+            if mode != "test" && !self.build.isEmpty { args += ["--build", self.build] }
             let job = try await self.call(args, as: Job.self)
             if self.selectedProject == job.project { self.selectedJob = job.id; self.detail = job }
             try await self.refresh()
         }
     }
-    func select(_ id: String?) { selectedJob = id; detail = nil; Task { do { try await refresh() } catch { self.error = error.localizedDescription } } }
+    func select(_ id: String?) { guard id != selectedJob else { return }; selectedJob = id; detail = nil; Task { do { try await refresh() } catch { self.error = error.localizedDescription } } }
     func lease(_ d: Device) {
         perform {
             if let lease = d.lease { try await self.command(["lease", "release", "--device", d.id, "--token", lease.token]) }
@@ -209,7 +225,8 @@ struct ContentView: View {
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
-                if !m.busy { do { try await m.refresh() } catch { m.error = error.localizedDescription } }
+                guard !Task.isCancelled else { break }
+                do { try await m.refresh() } catch { m.error = error.localizedDescription }
             }
         }
     }
@@ -218,6 +235,7 @@ struct ContentView: View {
 struct ReleasesView: View {
     @EnvironmentObject var m: Model
     @State private var confirmingUpload = false
+    @State private var showingReadiness = false
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 14) {
@@ -230,23 +248,39 @@ struct ReleasesView: View {
                 }
                 LabeledContent("Worktree") { TextField(m.currentProject?.root ?? "Repository path", text: $m.worktree).textFieldStyle(.roundedBorder).onChange(of: m.worktree) { _, _ in m.preflight = nil } }
                 HStack {
+                    Button("Run Tests") { m.start("test") }.disabled(m.busy || m.testConflict)
+                        .help("Run the test suites without archiving or uploading. Uncommitted changes are allowed.")
                     TextField("Build number (automatic)", text: $m.build).textFieldStyle(.roundedBorder).frame(width: 230)
                     Toggle("Skip tests", isOn: $m.skipTests).help("Use only when this exact commit has already passed the required tests.")
                     Spacer()
                     Text("Free simulators are leased automatically").font(.caption).foregroundStyle(.secondary)
                 }
                 if let p = m.preflight {
-                    DisclosureGroup(p.ready ? "Ready for project release checks" : "Readiness checks need attention") {
-                        VStack(alignment: .leading, spacing: 7) {
-                            ForEach(p.checks) { check in
-                                HStack(alignment: .top) {
-                                    Image(systemName: check.ok ? "checkmark.circle.fill" : "exclamationmark.circle.fill").foregroundStyle(check.ok ? .green : .orange)
-                                    Text(check.name).frame(width: 110, alignment: .leading)
-                                    Text(check.detail).foregroundStyle(.secondary).textSelection(.enabled)
-                                }.font(.caption)
-                            }
-                            Text(p.note).font(.caption).foregroundStyle(.secondary)
-                        }.padding(.top, 8)
+                    DisclosureGroup(isExpanded: $showingReadiness) {
+                        ScrollView(.vertical) {
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(p.checks) { check in
+                                    HStack(alignment: .top, spacing: 8) {
+                                        Image(systemName: check.ok ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                                            .foregroundStyle(check.ok ? .green : .orange)
+                                            .accessibilityLabel(check.ok ? "Passed" : "Needs attention")
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(check.name).fontWeight(.medium)
+                                            Text(check.detail)
+                                                .foregroundStyle(.secondary)
+                                                .textSelection(.enabled)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                        }.frame(maxWidth: .infinity, alignment: .leading)
+                                    }.font(.caption)
+                                }
+                                Text(p.note).font(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                        }
+                        .frame(height: 160)
+                        .accessibilityLabel("Readiness check results")
+                    } label: {
+                        Text(p.ready ? "Ready for project release checks" : "Readiness checks need attention")
                     }
                 }
             }.padding(22)
@@ -259,7 +293,7 @@ struct ReleasesView: View {
                     } else {
                         List(m.visibleJobs, selection: Binding(get: { m.selectedJob }, set: { m.select($0) })) { job in
                             VStack(alignment: .leading, spacing: 7) {
-                                HStack { Image(systemName: job.active ? "clock" : job.status == "failed" ? "exclamationmark.circle" : "checkmark.circle"); Text(job.mode == "testflight" ? "TestFlight" : "Local archive").fontWeight(.medium) }
+                                HStack { Image(systemName: job.active ? "clock" : job.status == "failed" ? "exclamationmark.circle" : "checkmark.circle"); Text(job.title).fontWeight(.medium) }
                                 Text(job.stage).font(.caption).foregroundStyle(.secondary)
                                 Text(String(job.commit.prefix(8)) + " · " + String(job.created.prefix(16)).replacingOccurrences(of: "T", with: " ")).font(.caption2).foregroundStyle(.secondary)
                             }.padding(.vertical, 5).tag(job.id)
@@ -270,6 +304,7 @@ struct ReleasesView: View {
                 else { ContentUnavailableView("Release details", systemImage: "list.bullet.rectangle", description: Text("Select a run to see its stage, logs and source commit.")).frame(maxWidth: .infinity, maxHeight: .infinity) }
             }
         }
+        .onChange(of: m.selectedProject) { _, _ in showingReadiness = false }
         .confirmationDialog("Release \(m.currentProject?.name ?? "app") to TestFlight?", isPresented: $confirmingUpload, titleVisibility: .visible) {
             Button(m.skipTests ? "Build and Upload" : "Run Tests, Build and Upload") { m.start("testflight") }
             Button("Cancel", role: .cancel) { }
@@ -280,6 +315,7 @@ struct ReleasesView: View {
 struct JobView: View {
     @EnvironmentObject var m: Model
     let job: Job
+    @State private var followOutput = true
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -291,6 +327,7 @@ struct JobView: View {
                 }
             }
             Text(job.root).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if job.mode == "test" { Text(job.dirty == true ? "Tests · includes uncommitted changes" : "Tests · no archive or upload").font(.caption).foregroundStyle(.secondary) }
             if !job.error.isEmpty { Text(job.error).foregroundStyle(.orange).textSelection(.enabled) }
             if job.status == "uploaded" || job.status == "available" {
                 Text(job.status == "available" ? "App Store Connect reports this build is available to a tester group." : "Check Apple’s processing and beta distribution status using the project API key.").font(.callout)
@@ -301,13 +338,78 @@ struct JobView: View {
             HStack {
                 Text("Run log").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 Spacer()
+                Toggle("Follow output", isOn: $followOutput).toggleStyle(.checkbox)
                 Button("Reveal Run Files") { NSWorkspace.shared.selectFile(job.log, inFileViewerRootedAtPath: "") }
+                if let artifacts = job.artifacts, job.mode == "test" { Button("Test Results") { m.open(artifacts) } }
                 Button("Open Project") { m.open(job.root) }
             }
-            ScrollView([.vertical, .horizontal]) {
-                Text(job.output ?? "Waiting for output…").font(.system(size: 11, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .topLeading).padding(12)
-            }.background(Color(nsColor: .textBackgroundColor)).border(Color(nsColor: .separatorColor), width: 0.5)
-        }.padding(20).frame(minWidth: 370, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            RunLogView(jobID: job.id, output: job.output, active: job.active, followOutput: followOutput)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .border(Color(nsColor: .separatorColor), width: 0.5)
+        }
+        .onChange(of: job.id) { _, _ in followOutput = true }.padding(20).frame(minWidth: 370, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+/// AppKit lays out large, selectable logs without SwiftUI Text's sizing ambiguity.
+struct RunLogView: NSViewRepresentable {
+    let jobID: String
+    let output: String?
+    let active: Bool
+    let followOutput: Bool
+
+    final class Coordinator {
+        var jobID: String?
+        var followOutput = false
+    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        let text = NSTextView(frame: .zero)
+        text.isEditable = false
+        text.isSelectable = true
+        text.isRichText = false
+        text.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        text.textColor = .textColor
+        text.backgroundColor = .textBackgroundColor
+        text.textContainerInset = NSSize(width: 12, height: 12)
+        text.minSize = .zero
+        text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        text.isVerticallyResizable = true
+        text.isHorizontallyResizable = true
+        text.textContainer?.containerSize = text.maxSize
+        text.textContainer?.widthTracksTextView = false
+        text.setAccessibilityLabel("Run log")
+        scroll.documentView = text
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        guard let text = scroll.documentView as? NSTextView else { return }
+        let changedJob = context.coordinator.jobID != jobID
+        let value = output.flatMap { $0.isEmpty ? nil : $0 }
+            ?? (active ? "Waiting for output…" : "No output was recorded for this run.")
+        let changedText = text.string != value
+        let resumed = followOutput && !context.coordinator.followOutput
+        let origin = scroll.contentView.bounds.origin
+        if changedText || changedJob {
+            text.string = value
+            text.layoutManager?.ensureLayout(for: text.textContainer!)
+            text.sizeToFit()
+        }
+        if followOutput && (changedText || changedJob || resumed) {
+            text.scrollRangeToVisible(NSRange(location: text.string.utf16.count, length: 0))
+        } else if changedText || changedJob {
+            scroll.contentView.scroll(to: changedJob ? .zero : origin)
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
+        context.coordinator.jobID = jobID
+        context.coordinator.followOutput = followOutput
     }
 }
 

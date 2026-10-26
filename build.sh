@@ -9,6 +9,14 @@ app="$root/FlightDeck.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/engine"
 cp "$cache/release/FlightDeck" "$app/Contents/MacOS/FlightDeck"
 cp "$root/engine/flightdeck.py" "$root/engine/asc.py" "$root/engine/projects.json" "$app/Contents/Resources/engine/"
+# Compile the editable Icon Composer document for modern and older macOS.
+xcrun actool "$root/Resources/FlightDeck.icon" \
+  --compile "$app/Contents/Resources" \
+  --output-format human-readable-text --notices --warnings --errors \
+  --output-partial-info-plist "$cache/icon-info.plist" \
+  --app-icon FlightDeck --include-all-app-icons \
+  --enable-on-demand-resources NO --development-region en \
+  --target-device mac --minimum-deployment-target 14.0 --platform macosx
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -23,6 +31,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+/usr/libexec/PlistBuddy -c "Merge '$cache/icon-info.plist'" "$app/Contents/Info.plist"
 xattr -cr "$app"
 codesign --force --sign - "$app"
 echo "$app"

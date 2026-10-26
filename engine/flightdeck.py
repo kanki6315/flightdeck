@@ -93,7 +93,7 @@ def project(key, root=None):
     return p
 
 
-def check(p):
+def check(p, mode='archive'):
     checks = []
     def add(name, fn):
         try: checks.append(dict(name=name, ok=True, detail=str(fn())))
@@ -105,13 +105,13 @@ def check(p):
         changes = run(['git', 'status', '--porcelain'], root)
         if changes: raise ValueError('Working tree has changes. Commit them before releasing.\n' + changes[:1500])
         return 'Clean'
-    add('Working tree', clean)
+    if mode != 'test': add('Working tree', clean)
     def script():
-        path = root / p['script']
-        if not path.is_file(): raise ValueError('Missing release script: ' + str(path))
-        if 'FLIGHTDECK_PROTOCOL=1' not in path.read_text(): raise ValueError('FlightDeck integration is not installed.')
+        path = root / ('.flightdeck/test.sh' if mode == 'test' else p['script'])
+        if not path.is_file(): raise ValueError('Missing job script: ' + str(path))
+        if ('FLIGHTDECK_TEST_PROTOCOL=1' if mode == 'test' else 'FLIGHTDECK_PROTOCOL=1') not in path.read_text(): raise ValueError('FlightDeck integration is not installed.')
         return str(path)
-    add('Release script', script)
+    add('Test script' if mode == 'test' else 'Release script', script)
     add('Xcode', lambda: run(['xcodebuild', '-version']))
     for tool in ['python3', 'xcodegen']:
         def exists(t=tool):
@@ -223,11 +223,14 @@ def allocate_build(c, p):
 
 def start(args):
     p = project(args.project, args.worktree)
-    preflight = check(p)
+    if args.mode == 'test' and (args.skip_tests or args.build):
+        raise ValueError('Test jobs do not accept --skip-tests or --build.')
+    preflight = check(p, args.mode)
     if not preflight['ready']: raise ValueError('Preflight failed: ' + '; '.join(x['name'] + ': ' + x['detail'] for x in preflight['checks'] if not x['ok']))
-    script = Path(p['root']) / p['script']
+    script_name = '.flightdeck/test.sh' if args.mode == 'test' else p['script']
+    script = Path(p['root']) / script_name
     # The managed integration is required so destination selection cannot fall back silently.
-    if 'FLIGHTDECK_PROTOCOL=1' not in script.read_text(): raise ValueError('Install the FlightDeck integration for this project first (see README).')
+    if ('FLIGHTDECK_TEST_PROTOCOL=1' if args.mode == 'test' else 'FLIGHTDECK_PROTOCOL=1') not in script.read_text(): raise ValueError('Install the FlightDeck integration for this project first (see README).')
     devices = inventory() if not args.skip_tests else []
     selected = []
     if not args.skip_tests:
@@ -240,16 +243,17 @@ def start(args):
     path = STATE / 'runs' / key
     path.mkdir(parents=True)
     commit = run(['git', 'rev-parse', 'HEAD'], p['root'])
-    payload = dict(script=p['script'], skipTests=args.skip_tests, devices=selected, commit=commit, log=str(path/'output.log'), build=args.build or '', error='', bundle=p.get('bundle', ''))
+    payload = dict(script=script_name, dirty=bool(run(['git', 'status', '--porcelain'], p['root'])), artifacts=str(path/'artifacts'), skipTests=args.skip_tests, devices=selected, commit=commit, log=str(path/'output.log'), build=args.build or '', error='', bundle=p.get('bundle', ''))
     with transaction() as c:
         placeholders = ','.join('?' * len(ACTIVE))
-        if c.execute(f'SELECT id FROM jobs WHERE status IN ({placeholders})', ACTIVE).fetchone():
-            raise ValueError('Another job is active or needs recovery. This version serializes releases to bound CPU and disk usage.')
+        active_jobs = c.execute(f'SELECT root,mode FROM jobs WHERE status IN ({placeholders})', ACTIVE).fetchall()
+        if any(args.mode != 'test' or j['mode'] != 'test' or Path(j['root']).resolve() == Path(p['root']).resolve() for j in active_jobs):
+            raise ValueError('A conflicting job is active or needs recovery. Test jobs require separate worktrees; releases run exclusively.')
         tokens = {d: acquire(c, d, p, key, 'test-run') for d in selected}
         payload['leaseTokens'] = tokens
         # Explicit overrides remain available when migrating an existing version train.
         if args.build and not re.fullmatch(r'[1-9][0-9]{0,3}(\.[0-9]{1,2}){0,2}', args.build): raise ValueError('Build number must use up to 4/2/2 digits, for example 298.12.30.')
-        if not payload['build']: payload['build']=allocate_build(c,p)
+        if args.mode != 'test' and not payload['build']: payload['build']=allocate_build(c,p)
         c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)', (key,p['id'],p['root'],args.mode,'queued','Waiting',now(),now(),0,json.dumps(payload)))
     with (path/'worker.log').open('a') as output:
         try:
@@ -270,13 +274,13 @@ def worker(key):
     final_status, final_stage, final_error = 'failed', 'Failed', ''
     try:
         if (path/'cancel').exists(): raise InterruptedError('Cancelled before starting')
-        if run(['git', 'rev-parse', 'HEAD'], job['root']) != job['commit'] or run(['git', 'status', '--porcelain'], job['root']):
-            raise ValueError('Checkout changed after preflight. Nothing was released.')
+        if run(['git', 'rev-parse', 'HEAD'], job['root']) != job['commit'] or (job['mode'] != 'test' and run(['git', 'status', '--porcelain'], job['root'])):
+            raise ValueError('Checkout changed after preflight. Job was not started.')
         args = ['/bin/bash', str(Path(job['root'])/job['script'])]
         if job['mode'] == 'archive': args += ['--no-upload']
         if job['skipTests']: args += ['--skip-tests']
         if job['build']: args += ['--build', job['build']]
-        env = dict(ENV, FLIGHTDECK_RUN_ID=key, FLIGHTDECK_EVENTS_FILE=str(path/'script-events.jsonl'))
+        env = dict(ENV, FLIGHTDECK_RUN_ID=key, FLIGHTDECK_EVENTS_FILE=str(path/'script-events.jsonl'), FLIGHTDECK_ARTIFACTS_DIR=str(path/'artifacts'))
         if job['devices']:
             env['TEST_DESTINATION'] = 'platform=iOS Simulator,id=' + job['devices'][0]
             env['TEST_IPHONE_UDID'] = job['devices'][0]
@@ -293,7 +297,7 @@ def worker(key):
                     try: child.wait(timeout=10)
                     except subprocess.TimeoutExpired:
                         os.killpg(child.pid, signal.SIGKILL); child.wait()
-                    raise InterruptedError('Cancelled. An upload already accepted by Apple cannot be undone.')
+                    raise InterruptedError('Tests cancelled.' if job['mode'] == 'test' else 'Cancelled. An upload already accepted by Apple cannot be undone.')
                 events = path/'script-events.jsonl'
                 if events.exists():
                     with events.open() as source:
@@ -314,9 +318,9 @@ def worker(key):
                     data=json.loads(line)
                     update_job(key,**{k:v for k,v in data.items() if k in ('archive','version','build') and v})
                 except (ValueError,KeyError): pass
-        if child.returncode: raise ValueError(f'Release script exited {child.returncode}. See the run log for the failing check.')
+        if child.returncode: raise ValueError(f'Job script exited {child.returncode}. See the run log for the failing check.')
         status = 'uploaded' if job['mode'] == 'testflight' else 'succeeded'
-        stage = 'Uploaded · Apple processing not yet verified' if status == 'uploaded' else 'Archive complete'
+        stage = 'Uploaded · Apple processing not yet verified' if status == 'uploaded' else ('Tests complete' if job['mode'] == 'test' else 'Archive complete')
         final_status, final_stage = status, stage
     except InterruptedError as e:
         final_status, final_stage, final_error = 'cancelled', 'Cancelled', str(e)
@@ -468,8 +472,8 @@ def device_action(args):
 def parser():
     a=argparse.ArgumentParser(description=__doc__); sub=a.add_subparsers(dest='command',required=True)
     sub.add_parser('projects'); sub.add_parser('jobs'); sub.add_parser('devices'); sub.add_parser('storage')
-    p=sub.add_parser('preflight'); p.add_argument('project'); p.add_argument('--worktree')
-    p=sub.add_parser('start'); p.add_argument('project'); p.add_argument('--worktree'); p.add_argument('--mode',choices=['archive','testflight'],default='archive'); p.add_argument('--skip-tests',action='store_true'); p.add_argument('--device',action='append'); p.add_argument('--build')
+    p=sub.add_parser('preflight'); p.add_argument('project'); p.add_argument('--worktree'); p.add_argument('--mode', choices=['test','archive','testflight'], default='archive')
+    p=sub.add_parser('start'); p.add_argument('project'); p.add_argument('--worktree'); p.add_argument('--mode',choices=['test','archive','testflight'],default='archive'); p.add_argument('--skip-tests',action='store_true'); p.add_argument('--device',action='append'); p.add_argument('--build')
     for name in ['cancel','recover','_worker','detail','asc-status','_monitor']:
         p=sub.add_parser(name); p.add_argument('id')
     p=sub.add_parser('lease'); p.add_argument('action',choices=['list','acquire','release','heartbeat']); p.add_argument('--device'); p.add_argument('--project'); p.add_argument('--worktree'); p.add_argument('--owner',default='manual'); p.add_argument('--token')
@@ -485,7 +489,7 @@ def main():
         if args.command=='projects': result=projects()
         elif args.command=='jobs': result=jobs()
         elif args.command=='devices': result=inventory()
-        elif args.command=='preflight': result=check(project(args.project,args.worktree))
+        elif args.command=='preflight': result=check(project(args.project,args.worktree), args.mode)
         elif args.command=='start': result=start(args)
         elif args.command=='_worker': worker(args.id); return
         elif args.command=='_monitor': monitor(args.id); return
