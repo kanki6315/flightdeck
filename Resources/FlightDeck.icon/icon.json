@@ -1,0 +1,38 @@
+{
+  "fill": {
+    "solid": "srgb:0.20784,0.15686,0.24706,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "Simulator.svg",
+          "name": "Simulator",
+          "glass": false
+        },
+        {
+          "image-name": "Takeoff-trail.svg",
+          "name": "Takeoff trail",
+          "glass": false
+        },
+        {
+          "image-name": "Flight-deck.svg",
+          "name": "Flight deck",
+          "glass": false
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.12
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0.0
+      },
+      "name": "Launch"
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}
